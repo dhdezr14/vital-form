@@ -1,0 +1,11 @@
+# Credenciales - NUNCA subir 
+config.py 
+# Base de datos 
+data/ 
+*.db 
+# Python 
+__pycache__/ 
+*.pyc 
+# Entorno virtual 
+venv/ 
+.env 
