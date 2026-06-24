@@ -1,0 +1,43 @@
+name: Sync diario Intervals.icu
+
+on:
+  schedule:
+    - cron: '0 11 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install requests
+
+      - name: Sync diario
+        env:
+          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
+          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
+        run: python sync_now.py --days 14 --no-streams
+
+      - name: Sync zonas FC (domingos)
+        env:
+          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
+          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
+        run: |
+          if [ "$(date -u +%u)" = "7" ]; then
+            python sync_now.py --days 30
+          fi
+
+      - name: Commit cambios
+        run: |
+          git config user.name "vital-form-bot"
+          git config user.email "actions@github.com"
+          git add data/triathlon.db
+          git diff --cached --quiet || git commit -m "data: sync automatico $(date -u +%Y-%m-%d)" && git push
