@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import json
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from pathlib import Path
@@ -153,11 +154,11 @@ def render_header():
 # ════════════════════════════════════════════════════════
 
 @st.cache_resource
-def get_db_connection():
-    return sqlite3.connect(str(DB_PATH), check_same_thread=False)
+def get_db_connection(db_path: str = str(DB_PATH)):
+    return sqlite3.connect(db_path, check_same_thread=False)
 
 def load_wellness_data_latest(limit=180):
-    conn = get_db_connection()
+    conn = get_db_connection(str(DB_PATH))
     query = """
         SELECT date, ctl, atl, tsb, eftp, hrv, rhr, sleep_secs
         FROM wellness
@@ -173,7 +174,7 @@ def load_wellness_data_latest(limit=180):
     return df
 
 def load_bodycomp_data_latest(limit=180):
-    conn = get_db_connection()
+    conn = get_db_connection(str(DB_PATH))
     query = """
         SELECT date, weight_kg, body_fat_pct, muscle_mass_kg,
                skeletal_muscle_kg, tbw_pct, visceral_fat
@@ -189,7 +190,7 @@ def load_bodycomp_data_latest(limit=180):
     return df
 
 def load_wellness_data_filtered(start_date, end_date):
-    conn = get_db_connection()
+    conn = get_db_connection(str(DB_PATH))
     query = """
         SELECT date, ctl, atl, tsb, eftp, hrv, rhr, sleep_secs
         FROM wellness
@@ -204,7 +205,7 @@ def load_wellness_data_filtered(start_date, end_date):
     return df
 
 def load_bodycomp_data_filtered(start_date, end_date):
-    conn = get_db_connection()
+    conn = get_db_connection(str(DB_PATH))
     query = """
         SELECT date, weight_kg, body_fat_pct, muscle_mass_kg,
                skeletal_muscle_kg, tbw_pct, visceral_fat
@@ -219,7 +220,7 @@ def load_bodycomp_data_filtered(start_date, end_date):
     return df
 
 def load_activities_data_filtered(start_date, end_date):
-    conn = get_db_connection()
+    conn = get_db_connection(str(DB_PATH))
     query = """
         SELECT date, name, sport, duration_sec, tss, distance_m
         FROM activities
@@ -231,6 +232,94 @@ def load_activities_data_filtered(start_date, end_date):
         return pd.DataFrame()
     df['date'] = pd.to_datetime(df['date'])
     return df
+
+def _load_sport_config():
+    """Lee umbrales por deporte desde sport_config. Usa defaults si no existe."""
+    defaults = {
+        "run":  {"vt1": 122, "vt2": 150, "rcp": 163, "fcmax": 170},
+        "ride": {"vt1": 110, "vt2": 127, "rcp": 150, "fcmax": 162},
+    }
+    try:
+        conn = get_db_connection(str(DB_PATH))
+        rows = conn.execute(
+            "SELECT sport, vt1_bpm, vt2_bpm, rcp_bpm, fcmax_bpm FROM sport_config"
+        ).fetchall()
+        for r in rows:
+            defaults[r[0].lower()] = {
+                "vt1": r[1], "vt2": r[2], "rcp": r[3], "fcmax": r[4]
+            }
+    except Exception:
+        pass
+    return defaults
+
+
+RUN_SPORTS  = {'run', 'running', 'trailrun', 'treadmill'}
+BIKE_SPORTS = {'ride', 'virtualride', 'cycling', 'mountainbikeride', 'ebikeride', 'handcycle'}
+
+# Nombre → (emoji, clave sport_config)
+SPORT_DEFS = {
+    'Run':   ('🏃', 'run'),
+    'Bike':  ('🚴', 'ride'),
+    'Otros': ('⚡', 'run'),   # usa umbrales run como proxy
+}
+
+
+@st.cache_data(ttl=300)
+def load_hr_zones_by_sport(start_iso: str, end_iso: str):
+    """
+    Lee hr_zone_times_by_sport para el período y agrupa en Run / Bike / Otros.
+    Devuelve dict: { 'Run': [z1..z5_secs], 'Bike': [...], 'Otros': [...] }
+    """
+    # Verificar que la columna existe
+    try:
+        conn = get_db_connection(str(DB_PATH))
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(activities)").fetchall()]
+        if "hr_zone_times_by_sport" not in cols:
+            return {}
+    except Exception:
+        return {}
+
+    try:
+        df = pd.read_sql_query(
+            """SELECT sport, hr_zone_times_by_sport
+               FROM activities
+               WHERE date >= ? AND date <= ?
+                 AND hr_zone_times_by_sport IS NOT NULL""",
+            conn,
+            params=(start_iso, end_iso),
+        )
+    except Exception:
+        return {}
+
+    if df.empty:
+        return {}
+
+    zones_by_sport: dict[str, list[float]] = {}
+
+    for _, row in df.iterrows():
+        try:
+            data = json.loads(row["hr_zone_times_by_sport"])
+            zones = data.get("zones", [])
+            if len(zones) < 5:
+                continue
+        except Exception:
+            continue
+
+        sport_raw = (row["sport"] or "").lower().strip()
+        if sport_raw in RUN_SPORTS:
+            bucket = "Run"
+        elif sport_raw in BIKE_SPORTS:
+            bucket = "Bike"
+        else:
+            bucket = "Otros"
+
+        if bucket not in zones_by_sport:
+            zones_by_sport[bucket] = [0.0] * 5
+        for i in range(5):
+            zones_by_sport[bucket][i] += zones[i]
+
+    return zones_by_sport
+
 
 def get_date_range(period):
     today = datetime.now().date()
@@ -579,30 +668,65 @@ def main():
     st.subheader("⏱️ Tiempo en Zonas de FC")
 
     zone_colors = ['#9ca3af', COLORS['blue'], COLORS['green'], COLORS['orange'], COLORS['red']]
-    zones_data  = [
-        {'name': 'Z1 Recuperación', 'range': '<110 bpm',   'time': 180, 'color': zone_colors[0]},
-        {'name': 'Z2 Aeróbico',     'range': '110–127 bpm','time': 312, 'color': zone_colors[1]},
-        {'name': 'Z3 Tempo',        'range': '127–150 bpm','time': 663, 'color': zone_colors[2]},
-        {'name': 'Z4 Umbral',       'range': '150–162 bpm','time': 175, 'color': zone_colors[3]},
-        {'name': 'Z5 VO2max',       'range': '>162 bpm',   'time':   0, 'color': zone_colors[4]},
-    ]
-    total_zone_time = sum(z['time'] for z in zones_data)
+    zone_names  = ['Z1 Recuperación', 'Z2 Aeróbico', 'Z3 Tempo', 'Z4 Umbral', 'Z5 VO2max']
 
-    for z in zones_data:
-        pct   = (z['time'] / total_zone_time * 100) if total_zone_time else 0
-        hours = z['time'] // 60
-        mins  = z['time'] % 60
-        c1, c2, c3, c4 = st.columns([1.4, 2.5, 0.5, 0.9])
-        with c1: st.caption(f"**{z['name']}** {z['range']}")
-        with c2:
-            st.markdown(
-                f'<div style="background:rgba(255,255,255,0.08);border-radius:4px;height:22px;overflow:hidden;">'
-                f'<div style="background:{z["color"]};height:100%;width:{pct}%;border-radius:4px;"></div>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
-        with c3: st.caption(f"**{pct:.0f}%**")
-        with c4: st.caption(f"{hours}h {mins:02d}m")
+    zones_by_sport = load_hr_zones_by_sport(start_date.isoformat(), end_date.isoformat())
+    sport_configs  = _load_sport_config()
+
+    disciplines = [d for d in ['Run', 'Bike', 'Otros'] if d in zones_by_sport]
+
+    if not disciplines:
+        st.info("Sin datos de zonas FC para el período seleccionado.")
+    else:
+        cols = st.columns(len(disciplines))
+        for col, discipline in zip(cols, disciplines):
+            emoji, cfg_key = SPORT_DEFS[discipline]
+            cfg = sport_configs.get(cfg_key, sport_configs.get('run', {}))
+            z1 = cfg.get('vt1', 122)
+            z2 = cfg.get('vt2', 150)
+            z3 = cfg.get('rcp', 163)
+            z4 = cfg.get('fcmax', 170)
+            zone_ranges = [
+                f'<{z1} bpm',
+                f'{z1}–{z2} bpm',
+                f'{z2}–{z3} bpm',
+                f'{z3}–{z4} bpm',
+                f'>{z4} bpm',
+            ]
+            zone_secs   = zones_by_sport[discipline]
+            total_secs  = sum(zone_secs)
+
+            with col:
+                st.markdown(f"**{emoji} {discipline}**")
+                for i, (name, rng, secs, color) in enumerate(
+                    zip(zone_names, zone_ranges, zone_secs, zone_colors)
+                ):
+                    pct   = (secs / total_secs * 100) if total_secs else 0
+                    hours = int(secs) // 3600
+                    mins  = (int(secs) % 3600) // 60
+                    gray  = COLORS['gray']
+                    time_str = f"{hours}h {mins:02d}m" if hours else f"{mins}m"
+                    c1, c2, c3 = st.columns([1.5, 2.5, 0.9])
+                    with c1:
+                        st.markdown(
+                            f'<span style="font-size:11px;color:{gray};">'
+                            f'<b>{name}</b><br>{rng}</span>',
+                            unsafe_allow_html=True
+                        )
+                    with c2:
+                        st.markdown(
+                            f'<div style="background:rgba(255,255,255,0.08);'
+                            f'border-radius:4px;height:18px;overflow:hidden;margin-top:6px;">'
+                            f'<div style="background:{color};height:100%;'
+                            f'width:{pct:.1f}%;border-radius:4px;"></div></div>',
+                            unsafe_allow_html=True
+                        )
+                    with c3:
+                        st.markdown(
+                            f'<span style="font-size:11px;color:{gray};">'
+                            f'<b>{pct:.0f}%</b><br>{time_str}</span>',
+                            unsafe_allow_html=True
+                        )
 
     st.divider()
 
