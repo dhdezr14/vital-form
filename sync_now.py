@@ -49,6 +49,10 @@ SPORT_MAP = {
 def get_conn():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
+    # DELETE en vez de WAL: la DB se commitea a git; con WAL los writes
+    # pueden quedar en el archivo -wal y no llegar al .db commiteado
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    conn.execute("PRAGMA journal_mode=DELETE")
     # Asegurar columna hr_zone_times_by_sport
     cols = [r[1] for r in conn.execute("PRAGMA table_info(activities)").fetchall()]
     if "hr_zone_times_by_sport" not in cols:

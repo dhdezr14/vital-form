@@ -20,20 +20,13 @@ jobs:
 
       - run: pip install requests
 
+      # Con streams: solo descarga zonas FC de actividades nuevas
+      # (las que ya tienen hr_zone_times_by_sport se saltan), asi que es barato
       - name: Sync diario
         env:
           INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
           INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
-        run: python sync_now.py --days 14 --no-streams
-
-      - name: Sync zonas FC (domingos)
-        env:
-          INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
-          INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
-        run: |
-          if [ "$(date -u +%u)" = "7" ]; then
-            python sync_now.py --days 30
-          fi
+        run: python sync_now.py --days 14
 
       - name: Commit cambios
         run: |
