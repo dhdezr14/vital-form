@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '0 14 * * *'
   workflow_dispatch: {}
+  push:
+    paths:
+      - 'Fitdays/*.csv'
 
 permissions:
   contents: write
@@ -18,19 +21,24 @@ jobs:
         with:
           python-version: '3.12'
 
-      - run: pip install requests
+      - run: pip install requests xlrd
 
       # Con streams: solo descarga zonas FC de actividades nuevas
-      # (las que ya tienen hr_zone_times_by_sport se saltan), asi que es barato
-      - name: Sync diario
+      # (las que ya tienen hr_zone_times_by_sport se saltan), asi que es barato.
+      # En push de CSVs de Fitdays se salta Intervals y solo actualiza bodycomp.
+      - name: Sync diario Intervals.icu
+        if: github.event_name != 'push'
         env:
           INTERVALS_API_KEY: ${{ secrets.INTERVALS_API_KEY }}
           INTERVALS_ATHLETE_ID: ${{ secrets.INTERVALS_ATHLETE_ID }}
         run: python sync_now.py --days 14
 
+      - name: Composicion corporal (Fitdays -> body_composition)
+        run: python scripts/update_bodycomp.py
+
       - name: Commit cambios
         run: |
           git config user.name "vital-form-bot"
           git config user.email "actions@github.com"
-          git add data/triathlon.db
+          git add data/triathlon.db fitdays_db.csv
           git diff --cached --quiet || git commit -m "data: sync automatico $(date -u +%Y-%m-%d)" && git push
